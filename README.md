@@ -20,10 +20,10 @@ A comprehensive Linux installation script for [CLIProxyAPI](https://github.com/r
 
 ```bash
 # Download and run the installer
-curl -fsSL https://raw.githubusercontent.com/router-for-me/cliproxyapi-installer/refs/heads/master/cliproxyapi-installer | bash
+curl -fsSL https://raw.githubusercontent.com/qihang518887/cliproxyapi-installer/refs/heads/master/cliproxyapi-installer | bash
 
 # Or clone and run manually
-git clone https://github.com/router-for-me/cliproxyapi-installer.git
+git clone https://github.com/qihang518887/cliproxyapi-installer.git
 cd cliproxyapi-installer
 ./cliproxyapi-installer
 ```
@@ -51,6 +51,12 @@ cd cliproxyapi-installer
      ./cli-proxy-api
 
      # Or as a systemd service (recommended)
+     # If installed as root:
+     systemctl enable cliproxyapi.service
+     systemctl start cliproxyapi.service
+     systemctl status cliproxyapi.service
+
+     # If installed as non-root user:
      systemctl --user enable cliproxyapi.service
      systemctl --user start cliproxyapi.service
      systemctl --user status cliproxyapi.service
@@ -58,10 +64,12 @@ cd cliproxyapi-installer
 
 4. **Enable autostart on boot** (recommended):
      ```bash
-     # Enable the service to start automatically on user login
+     # Root:
+     systemctl enable cliproxyapi.service
+     systemctl is-enabled cliproxyapi.service
+
+     # Non-root user:
      systemctl --user enable cliproxyapi.service
-     
-     # Verify it's enabled
      systemctl --user is-enabled cliproxyapi.service
      ```
 
@@ -191,9 +199,24 @@ The installer provides intelligent service handling during upgrades:
 
 ### Basic Service Management
 
+> **Privilege Auto-detection**:
+> - When running as **root**, the installer manages a system-wide service via `systemctl` (/etc/systemd/system/cliproxyapi.service).
+> - When running as a **non-root user**, it uses user-level systemd via `systemctl --user` (~/.config/systemd/user/cliproxyapi.service).
+>
+> Existing root user services are migrated to the system service before upgrading, preserving their running and enabled states. Running the installer again also refreshes the service file when the binary is already up to date.
+>
+> If `systemctl` is unavailable, systemd setup is skipped without writing service files. On Alpine, install the dependencies with `apk add bash curl tar`, run the installer with Bash, then start `~/cliproxyapi/cli-proxy-api` from `~/cliproxyapi`. OpenRC service setup is not included.
+
 ```bash
-# Enable the service (starts on user login)
+# Root:
+systemctl enable cliproxyapi.service
+systemctl start cliproxyapi.service
+systemctl status cliproxyapi.service
+
+# Non-root user:
 systemctl --user enable cliproxyapi.service
+systemctl --user start cliproxyapi.service
+systemctl --user status cliproxyapi.service
 
 # Start the service
 systemctl --user start cliproxyapi.service
@@ -423,7 +446,7 @@ This installer script is released under the same license as CLIProxyAPI.
 ## Support
 
 - **CLIProxyAPI Documentation**: https://github.com/router-for-me/CLIProxyAPI
-- **Installer Issues**: https://github.com/router-for-me/cliproxyapi-installer/issues
+- **Installer Issues**: https://github.com/qihang518887/cliproxyapi-installer/issues
 - **General Help**: Run `./cliproxyapi-installer --help`
 
 ## Changelog

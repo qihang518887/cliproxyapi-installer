@@ -95,6 +95,77 @@ generate_api_key() {
     echo "${prefix}${key}"
 }
 
+# Check if running as root
+is_root() {
+    [[ "$EUID" -eq 0 ]]
+}
+
+# Get systemd service directory based on user privileges
+get_systemd_dir() {
+    if is_root; then
+        echo "/etc/systemd/system"
+    else
+        echo "$HOME/.config/systemd/user"
+    fi
+}
+
+# Get user-facing systemctl command string
+get_systemctl_cmd() {
+    if is_root; then
+        echo "systemctl"
+    else
+        echo "systemctl --user"
+    fi
+}
+
+# Execute systemctl with or without --user based on privileges
+run_systemctl() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 1
+    fi
+    if is_root; then
+        systemctl "$@"
+    else
+        systemctl --user "$@"
+    fi
+}
+
+# Move the old root user unit before upgrades can terminate its process.
+migrate_root_user_service() {
+    local old_service="$HOME/.config/systemd/user/cliproxyapi.service"
+    if ! is_root || ! command -v systemctl >/dev/null 2>&1 || [[ ! -f "$old_service" ]]; then
+        return
+    fi
+
+    local -x XDG_RUNTIME_DIR="/run/user/0"
+    local was_running=false
+    local was_enabled=false
+    if systemctl --user is-active --quiet cliproxyapi.service; then
+        was_running=true
+    fi
+    if systemctl --user is-enabled --quiet cliproxyapi.service; then
+        was_enabled=true
+    fi
+
+    create_systemd_service "$INSTALL_DIR"
+    systemctl --user --no-reload disable cliproxyapi.service
+    if [[ "$was_running" == true ]]; then
+        systemctl --user stop cliproxyapi.service
+    fi
+    rm -f "$old_service"
+    if [[ -S "$XDG_RUNTIME_DIR/systemd/private" ]]; then
+        systemctl --user daemon-reload
+    fi
+    if [[ "$was_enabled" == true ]]; then
+        run_systemctl enable cliproxyapi.service
+    fi
+    if [[ "$was_running" == true ]]; then
+        run_systemctl start cliproxyapi.service
+    fi
+    log_success "Migrated root user service to the system service"
+}
+
+
 # Manage documentation intelligently
 manage_documentation() {
     echo "Documentation Management"
@@ -289,22 +360,30 @@ show_quick_start() {
         echo -e "${BLUE}4. Start the service:${NC}"
         echo -e "   ${CYAN}./cli-proxy-api${NC}"
         echo
-        echo -e "${BLUE}5. Or run as a systemd service:${NC}"
-        echo -e "   ${CYAN}systemctl --user enable cliproxyapi.service${NC}"
-        echo -e "   ${CYAN}systemctl --user start cliproxyapi.service${NC}"
-        echo -e "   ${CYAN}systemctl --user status cliproxyapi.service${NC}"
-        echo
+        if command -v systemctl >/dev/null 2>&1; then
+            local sys_cmd
+            sys_cmd=$(get_systemctl_cmd)
+            echo -e "${BLUE}5. Or run as a systemd service:${NC}"
+            echo -e "   ${CYAN}${sys_cmd} enable cliproxyapi.service${NC}"
+            echo -e "   ${CYAN}${sys_cmd} start cliproxyapi.service${NC}"
+            echo -e "   ${CYAN}${sys_cmd} status cliproxyapi.service${NC}"
+            echo
+        fi
         echo -e "${BLUE}6. Read the full documentation:${NC}"
         echo -e "   ${CYAN}https://github.com/router-for-me/CLIProxyAPI${NC}"
     else
         echo -e "${BLUE}3. Start the service:${NC}"
         echo -e "   ${CYAN}./cli-proxy-api${NC}"
         echo
-        echo -e "${BLUE}4. Or run as a systemd service:${NC}"
-        echo -e "   ${CYAN}systemctl --user enable cliproxyapi.service${NC}"
-        echo -e "   ${CYAN}systemctl --user start cliproxyapi.service${NC}"
-        echo -e "   ${CYAN}systemctl --user status cliproxyapi.service${NC}"
-        echo
+        if command -v systemctl >/dev/null 2>&1; then
+            local sys_cmd
+            sys_cmd=$(get_systemctl_cmd)
+            echo -e "${BLUE}4. Or run as a systemd service:${NC}"
+            echo -e "   ${CYAN}${sys_cmd} enable cliproxyapi.service${NC}"
+            echo -e "   ${CYAN}${sys_cmd} start cliproxyapi.service${NC}"
+            echo -e "   ${CYAN}${sys_cmd} status cliproxyapi.service${NC}"
+            echo
+        fi
         echo -e "${BLUE}5. Read the full documentation:${NC}"
         echo -e "   ${CYAN}https://github.com/router-for-me/CLIProxyAPI${NC}"
     fi
@@ -387,6 +466,7 @@ check_dependencies() {
         log_info "Please install the missing tools and try again"
         log_info "On Ubuntu/Debian: sudo apt-get install curl wget tar"
         log_info "On CentOS/RHEL: sudo yum install curl wget tar"
+        log_info "On Alpine Linux: apk add bash curl tar"
         exit 1
     fi
 }
@@ -531,7 +611,7 @@ restore_config() {
 
 # Check if systemd service is running
 is_service_running() {
-    systemctl --user is-active --quiet cliproxyapi.service 2>/dev/null
+    run_systemctl is-active --quiet cliproxyapi.service 2>/dev/null
 }
 
 # Check if any CLIProxyAPI processes are running
@@ -580,7 +660,7 @@ stop_cliproxyapi_processes() {
 stop_service() {
     if is_service_running; then
         log_info "Stopping CLIProxyAPI service..."
-        systemctl --user stop cliproxyapi.service
+        run_systemctl stop cliproxyapi.service
         log_success "Service stopped"
     else
         log_info "Service is not running"
@@ -589,42 +669,58 @@ stop_service() {
 
 # Start systemd service
 start_service() {
+    local sys_cmd
+    sys_cmd=$(get_systemctl_cmd)
     log_info "Starting CLIProxyAPI service..."
-    systemctl --user start cliproxyapi.service
+    run_systemctl start cliproxyapi.service
     
     # Wait a moment and check if it started successfully
     sleep 2
     if is_service_running; then
         log_success "Service started successfully"
     else
-        log_warning "Service may not have started properly. Check with: systemctl --user status cliproxyapi.service"
+        log_warning "Service may not have started properly. Check with: ${sys_cmd} status cliproxyapi.service"
     fi
 }
 
 # Restart systemd service
 restart_service() {
+    local sys_cmd
+    sys_cmd=$(get_systemctl_cmd)
     log_info "Restarting CLIProxyAPI service..."
-    systemctl --user restart cliproxyapi.service
+    run_systemctl restart cliproxyapi.service
     
     # Wait a moment and check if it started successfully
     sleep 2
     if is_service_running; then
         log_success "Service restarted successfully"
     else
-        log_warning "Service may not have started properly. Check with: systemctl --user status cliproxyapi.service"
+        log_warning "Service may not have started properly. Check with: ${sys_cmd} status cliproxyapi.service"
     fi
 }
 
 # Create systemd service file
 create_systemd_service() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_info "systemctl not found; skipping systemd service setup. Run ${INSTALL_DIR}/cli-proxy-api directly."
+        return
+    fi
+
     local install_dir="$1"
     local service_file="${install_dir}/cliproxyapi.service"
-    local systemd_dir="$HOME/.config/systemd/user"
+    local systemd_dir
+    systemd_dir=$(get_systemd_dir)
     local systemd_service_file="${systemd_dir}/cliproxyapi.service"
+    local wanted_target="default.target"
+    if is_root; then
+        wanted_target="multi-user.target"
+    fi
+    local sys_cmd
+    sys_cmd=$(get_systemctl_cmd)
     
     log_info "Creating systemd service file..."
     
-    # Create systemd user directory
+    # Create systemd directory
     mkdir -p "$systemd_dir"
     
     # Create service file content with basic working configuration
@@ -642,21 +738,21 @@ RestartSec=10
 Environment=HOME=$HOME
 
 [Install]
-WantedBy=default.target
+WantedBy=$wanted_target
 EOF
 
-    # Copy to systemd user directory
+    # Copy to systemd directory
     cp "$service_file" "$systemd_service_file"
-    
-    # Reload systemd daemon
-    systemctl --user daemon-reload || log_warning "Could not reload systemd daemon (this is normal on first run)"
-
     log_success "Systemd service file created: $service_file"
+
+    # Reload systemd daemon
+    run_systemctl daemon-reload
+
     log_success "Systemd service installed: $systemd_service_file"
     log_info "To enable and start the service:"
-    log_info "  systemctl --user enable cliproxyapi.service"
-    log_info "  systemctl --user start cliproxyapi.service"
-    log_info "  systemctl --user status cliproxyapi.service"
+    log_info "  ${sys_cmd} enable cliproxyapi.service"
+    log_info "  ${sys_cmd} start cliproxyapi.service"
+    log_info "  ${sys_cmd} status cliproxyapi.service"
 }
 
 # Copy example config if no existing config and setup main directory structure
@@ -785,7 +881,13 @@ cleanup_old_versions() {
     
     # Get all version directories, sort them, and remove all but the latest 2
     local old_versions
-    old_versions=$(find "$INSTALL_DIR" -maxdepth 1 -type d -name "*.*.*" -printf "%f\n" | sort -V | head -n -2)
+    old_versions=$(
+        for dir in "$INSTALL_DIR"/*.*.*; do
+            if [[ -d "$dir" ]]; then
+                basename "$dir"
+            fi
+        done | sort -V | head -n -2
+    )
     
     if [[ -n "$old_versions" ]]; then
         echo "$old_versions" | while read -r version; do
@@ -811,6 +913,8 @@ make_executable() {
 
 # Main installation function
 install_cliproxyapi() {
+    migrate_root_user_service
+
     local current_version
     current_version=$(get_current_version)
     local current_asset_variant
@@ -863,6 +967,7 @@ install_cliproxyapi() {
     
     # Check if already up to date
     if [[ "$is_upgrade" == true && "$current_version" == "$version" && "$current_asset_variant" == "$asset_variant" ]]; then
+        create_systemd_service "$INSTALL_DIR"
         log_success "CLIProxyAPI is already up to date (version $version)"
         return
     fi
@@ -941,8 +1046,10 @@ install_cliproxyapi() {
             log_info "Service has been restarted automatically"
         elif is_service_running; then
             log_info "Service is running"
+        elif command -v systemctl >/dev/null 2>&1; then
+            log_info "To start the service: $(get_systemctl_cmd) start cliproxyapi.service"
         else
-            log_info "To start the service: systemctl --user start cliproxyapi.service"
+            log_info "To start CLIProxyAPI: cd $INSTALL_DIR && ./cli-proxy-api"
         fi
         
         # Check if this is the first time setup (no existing config)
@@ -993,10 +1100,15 @@ show_status() {
 
         echo "Release Asset Variant: $(get_current_asset_variant)"
         
-        if [[ -f "${INSTALL_DIR}/cliproxyapi.service" ]]; then
+        if ! command -v systemctl >/dev/null 2>&1; then
+            echo "Systemd Service: Unavailable (systemctl not found)"
+            echo "  To start: cd $INSTALL_DIR && ./cli-proxy-api"
+        elif [[ -f "$(get_systemd_dir)/cliproxyapi.service" ]]; then
+            local sys_cmd
+            sys_cmd=$(get_systemctl_cmd)
             echo "Systemd Service: Available"
-            echo "  To enable: systemctl --user enable cliproxyapi.service"
-            echo "  To start:  systemctl --user start cliproxyapi.service"
+            echo "  To enable: ${sys_cmd} enable cliproxyapi.service"
+            echo "  To start:  ${sys_cmd} start cliproxyapi.service"
         else
             echo "Systemd Service: Missing"
         fi
@@ -1011,7 +1123,15 @@ show_status() {
         # Show available versions
         if [[ -d "$INSTALL_DIR" ]]; then
             echo "Installed Versions:"
-            find "$INSTALL_DIR" -maxdepth 1 -type d -name "*.*.*" -printf "  %f\n" | sort -V
+            for dir in "$INSTALL_DIR"/*.*.*; do
+                if [[ -d "$dir" ]]; then
+                    basename "$dir"
+                fi
+            done | sort -V | while read -r v; do
+                if [[ -n "$v" ]]; then
+                    echo "  $v"
+                fi
+            done
         fi
     else
         echo "Status: Not installed"
@@ -1042,6 +1162,20 @@ uninstall_cliproxyapi() {
         exit 0
     fi
     
+    # Stop and disable systemd service if running or installed
+    if is_service_running; then
+        log_info "Stopping CLIProxyAPI service..."
+        run_systemctl stop cliproxyapi.service 2>/dev/null || true
+    fi
+    run_systemctl disable cliproxyapi.service 2>/dev/null || true
+    local installed_service
+    installed_service="$(get_systemd_dir)/cliproxyapi.service"
+    if [[ -f "$installed_service" ]]; then
+        rm -f "$installed_service"
+        run_systemctl daemon-reload 2>/dev/null || true
+        log_info "Removed systemd service file: $installed_service"
+    fi
+
     # Remove installation directory
     log_info "Removing CLIProxyAPI installation..."
     rm -rf "$INSTALL_DIR"
@@ -1097,8 +1231,10 @@ main() {
                     echo -e "  ${CYAN}cd ${INSTALL_DIR}${NC}"
                     echo -e "  ${CYAN}./cli-proxy-api${NC}"
                     echo
-                    echo -e "${BLUE}Or run as a service:${NC}"
-                    echo -e "  ${CYAN}systemctl --user start cliproxyapi.service${NC}"
+                    if command -v systemctl >/dev/null 2>&1; then
+                        echo -e "${BLUE}Or run as a service:${NC}"
+                        echo -e "  ${CYAN}$(get_systemctl_cmd) start cliproxyapi.service${NC}"
+                    fi
                 else
                     echo -e "❌ API Keys: ${RED}NOT CONFIGURED${NC}"
                     echo -e "❌ Status: ${RED}Not ready to run${NC}"
